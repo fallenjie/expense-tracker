@@ -486,12 +486,11 @@
           <div class="card-value expense" id="reportExpense">¥0</div>
         </div>
       </div>
+      <div id="reportSummary"></div>
       <div class="card" style="margin-top:12px;">
-        <div class="card-title">支出分类</div>
         <div id="categoryBreakdown"></div>
       </div>
       <div class="card" style="margin-top:12px;">
-        <div class="card-title">账单明细</div>
         <div id="reportRecords"></div>
       </div>
     </div>
@@ -624,9 +623,18 @@
 
   <script>
     // Appwrite Configuration
+    // TODO: 用户需自行配置以下占位符
+    // 1. 登录 Appwrite Console 创建 Project，将 Project ID 填入 APPWRITE_PROJECT
+    // 2. 创建 Database，创建以下 Collection 并填入对应 ID：
+    //    - bills: 存储账单记录
+    //    - categories: 存储分类（可选，如需服务端同步分类）
+    //    - budgets: 存储预算设置
     const APPWRITE_ENDPOINT = 'https://cloud.appwrite.io/v1';
-    const APPWRITE_PROJECT = 'your-project-id';
-    const APPWRITE_DATABASE = 'expense-tracker';
+    const APPWRITE_PROJECT = 'YOUR_APPWRITE_PROJECT_ID'; // 替换为您的 Project ID
+    const APPWRITE_DATABASE_ID = 'YOUR_DATABASE_ID'; // 替换为您的 Database ID
+    const APPWRITE_BILLS_COLLECTION = 'YOUR_BILLS_COLLECTION_ID'; // 账单 Collection ID
+    const APPWRITE_CATEGORIES_COLLECTION = 'YOUR_CATEGORIES_COLLECTION_ID'; // 分类 Collection ID
+    const APPWRITE_BUDGETS_COLLECTION = 'YOUR_BUDGETS_COLLECTION_ID'; // 预算 Collection ID
 
     // Initialize Appwrite
     const client = new Appwrite.Client();
@@ -634,6 +642,274 @@
 
     const account = new Appwrite.Account(client);
     const databases = new Appwrite.Databases(client);
+
+    // Appwrite Collection Attribute Keys（与 Appwrite Dashboard 中创建的 Attribute 对应）
+    const ATTR = {
+      USER_ID: 'userId',
+      TYPE: 'type',
+      AMOUNT: 'amount',
+      CATEGORY_ID: 'categoryId',
+      DATE: 'date',
+      NOTE: 'note',
+      CREATED_AT: 'createdAt',
+      UPDATED_AT: 'updatedAt',
+      NAME: 'name',
+      EMOJI: 'emoji',
+      IS_CUSTOM: 'isCustom',
+      CAT_TYPE: 'catType',
+      BUDGET_TYPE: 'budgetType',
+      BUDGET_AMOUNT: 'amount'
+    };
+
+    // ==================== Appwrite 数据层（替代 localStorage） ====================
+    // 当 Appwrite 配置正确时，以下函数使用 Appwrite SDK 进行数据 CRUD
+    // 配置不正确时降级到 localStorage 以保证 Demo 可用
+
+    const USE_APPWRITE = () => APPWRITE_PROJECT !== 'YOUR_APPWRITE_PROJECT_ID' && APPWRITE_PROJECT !== 'your-project-id';
+
+    // Bills CRUD
+    async function appwriteLoadBills() {
+      if (!USE_APPWRITE()) return loadBillsLocal();
+      try {
+        const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_BILLS_COLLECTION, [
+          Appwrite.Query.equal(ATTR.USER_ID, currentUser.id),
+          Appwrite.Query.orderDesc(ATTR.CREATED_AT)
+        ]);
+        return response.documents.map(doc => ({
+          id: doc.$id,
+          userId: doc[ATTR.USER_ID],
+          type: doc[ATTR.TYPE],
+          amount: doc[ATTR.AMOUNT],
+          categoryId: doc[ATTR.CATEGORY_ID],
+          date: doc[ATTR.DATE],
+          note: doc[ATTR.NOTE] || '',
+          createdAt: doc[ATTR.CREATED_AT],
+          updatedAt: doc[ATTR.UPDATED_AT]
+        }));
+      } catch (e) {
+        console.warn('Appwrite loadBills failed, falling back to localStorage:', e);
+        return loadBillsLocal();
+      }
+    }
+
+    async function appwriteSaveBill(bill) {
+      if (!USE_APPWRITE()) return saveBillLocal(bill);
+      try {
+        if (bill.id) {
+          // Update existing
+          await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BILLS_COLLECTION, bill.id, {
+            [ATTR.TYPE]: bill.type,
+            [ATTR.AMOUNT]: bill.amount,
+            [ATTR.CATEGORY_ID]: bill.categoryId,
+            [ATTR.DATE]: bill.date,
+            [ATTR.NOTE]: bill.note || '',
+            [ATTR.UPDATED_AT]: Date.now()
+          });
+        } else {
+          // Create new
+          await databases.createDocument(APPWRITE_DATABASE_ID, APPWRITE_BILLS_COLLECTION, 'unique()', {
+            [ATTR.USER_ID]: currentUser.id,
+            [ATTR.TYPE]: bill.type,
+            [ATTR.AMOUNT]: bill.amount,
+            [ATTR.CATEGORY_ID]: bill.categoryId,
+            [ATTR.DATE]: bill.date,
+            [ATTR.NOTE]: bill.note || '',
+            [ATTR.CREATED_AT]: Date.now(),
+            [ATTR.UPDATED_AT]: Date.now()
+          });
+        }
+        return true;
+      } catch (e) {
+        console.warn('Appwrite saveBill failed, falling back to localStorage:', e);
+        return saveBillLocal(bill);
+      }
+    }
+
+    async function appwriteDeleteBill(billId) {
+      if (!USE_APPWRITE()) return deleteBillLocal(billId);
+      try {
+        await databases.deleteDocument(APPWRITE_DATABASE_ID, APPWRITE_BILLS_COLLECTION, billId);
+        return true;
+      } catch (e) {
+        console.warn('Appwrite deleteBill failed, falling back to localStorage:', e);
+        return deleteBillLocal(billId);
+      }
+    }
+
+    // Categories CRUD
+    async function appwriteLoadCategories() {
+      if (!USE_APPWRITE()) return loadCategoriesLocal();
+      try {
+        const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_CATEGORIES_COLLECTION, [
+          Appwrite.Query.equal(ATTR.USER_ID, currentUser.id)
+        ]);
+        if (response.documents.length === 0) {
+          // Initialize preset categories on Appwrite
+          const cats = [...PRESET_EXPENSE_CATS, ...PRESET_INCOME_CATS];
+          for (const cat of cats) {
+            await databases.createDocument(APPWRITE_DATABASE_ID, APPWRITE_CATEGORIES_COLLECTION, 'unique()', {
+              [ATTR.USER_ID]: currentUser.id,
+              [ATTR.NAME]: cat.name,
+              [ATTR.EMOJI]: cat.emoji,
+              [ATTR.IS_CUSTOM]: false,
+              [ATTR.CAT_TYPE]: cat.id.startsWith('e') ? 'expense' : 'income'
+            });
+          }
+          return cats;
+        }
+        return response.documents.map(doc => ({
+          id: doc.$id,
+          name: doc[ATTR.NAME],
+          emoji: doc[ATTR.EMOJI],
+          isCustom: doc[ATTR.IS_CUSTOM] || false,
+          type: doc[ATTR.CAT_TYPE]
+        }));
+      } catch (e) {
+        console.warn('Appwrite loadCategories failed, falling back to localStorage:', e);
+        return loadCategoriesLocal();
+      }
+    }
+
+    async function appwriteSaveCategory(cat) {
+      if (!USE_APPWRITE()) return saveCategoryLocal(cat);
+      try {
+        if (cat.id && cat.id.startsWith('c_')) {
+          await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_CATEGORIES_COLLECTION, cat.id, {
+            [ATTR.NAME]: cat.name,
+            [ATTR.EMOJI]: cat.emoji
+          });
+        } else {
+          await databases.createDocument(APPWRITE_DATABASE_ID, APPWRITE_CATEGORIES_COLLECTION, 'unique()', {
+            [ATTR.USER_ID]: currentUser.id,
+            [ATTR.NAME]: cat.name,
+            [ATTR.EMOJI]: cat.emoji,
+            [ATTR.IS_CUSTOM]: true,
+            [ATTR.CAT_TYPE]: cat.type
+          });
+        }
+        return true;
+      } catch (e) {
+        console.warn('Appwrite saveCategory failed, falling back to localStorage:', e);
+        return saveCategoryLocal(cat);
+      }
+    }
+
+    async function appwriteDeleteCategory(catId) {
+      if (!USE_APPWRITE()) return deleteCategoryLocal(catId);
+      try {
+        await databases.deleteDocument(APPWRITE_DATABASE_ID, APPWRITE_CATEGORIES_COLLECTION, catId);
+        return true;
+      } catch (e) {
+        console.warn('Appwrite deleteCategory failed, falling back to localStorage:', e);
+        return deleteCategoryLocal(catId);
+      }
+    }
+
+    // Budget CRUD
+    async function appwriteLoadBudget() {
+      if (!USE_APPWRITE()) return loadBudgetLocal();
+      try {
+        const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_BUDGETS_COLLECTION, [
+          Appwrite.Query.equal(ATTR.USER_ID, currentUser.id)
+        ]);
+        if (response.documents.length > 0) {
+          return response.documents[0][ATTR.BUDGET_AMOUNT];
+        }
+        return 0;
+      } catch (e) {
+        console.warn('Appwrite loadBudget failed, falling back to localStorage:', e);
+        return loadBudgetLocal();
+      }
+    }
+
+    async function appwriteSaveBudget(amount) {
+      if (!USE_APPWRITE()) return saveBudgetLocal(amount);
+      try {
+        const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_BUDGETS_COLLECTION, [
+          Appwrite.Query.equal(ATTR.USER_ID, currentUser.id)
+        ]);
+        if (response.documents.length > 0) {
+          await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BUDGETS_COLLECTION, response.documents[0].$id, {
+            [ATTR.BUDGET_AMOUNT]: amount
+          });
+        } else {
+          await databases.createDocument(APPWRITE_DATABASE_ID, APPWRITE_BUDGETS_COLLECTION, 'unique()', {
+            [ATTR.USER_ID]: currentUser.id,
+            [ATTR.BUDGET_AMOUNT]: amount
+          });
+        }
+        return true;
+      } catch (e) {
+        console.warn('Appwrite saveBudget failed, falling back to localStorage:', e);
+        return saveBudgetLocal(amount);
+      }
+    }
+
+    // LocalStorage fallback functions (保持与原有逻辑兼容)
+    function loadBillsLocal() {
+      let bills = localStorage.getItem(STORAGE_KEYS.BILLS);
+      if (!bills) {
+        bills = [];
+        localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(bills));
+      }
+      return JSON.parse(bills);
+    }
+
+    function saveBillLocal(bill) {
+      const bills = loadBillsLocal();
+      if (bill.id) {
+        const idx = bills.findIndex(b => b.id === bill.id);
+        if (idx !== -1) bills[idx] = { ...bills[idx], ...bill, updatedAt: Date.now() };
+      } else {
+        bills.push({ ...bill, id: 'b_' + Date.now(), createdAt: Date.now(), updatedAt: Date.now() });
+      }
+      localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(bills));
+      return true;
+    }
+
+    function deleteBillLocal(billId) {
+      let bills = loadBillsLocal();
+      bills = bills.filter(b => b.id !== billId);
+      localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(bills));
+      return true;
+    }
+
+    function loadCategoriesLocal() {
+      let cats = localStorage.getItem(STORAGE_KEYS.CATEGORIES);
+      if (!cats) {
+        cats = [...PRESET_EXPENSE_CATS, ...PRESET_INCOME_CATS];
+        localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(cats));
+      }
+      return JSON.parse(cats);
+    }
+
+    function saveCategoryLocal(cat) {
+      const cats = loadCategoriesLocal();
+      if (cat.id && cat.id.startsWith('c_')) {
+        const idx = cats.findIndex(c => c.id === cat.id);
+        if (idx !== -1) cats[idx] = { ...cats[idx], ...cat };
+      } else {
+        cats.push({ ...cat, id: 'c_' + (cat.type === 'expense' ? 'e' : 'i') + '_' + Date.now(), isCustom: true });
+      }
+      localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(cats));
+      return true;
+    }
+
+    function deleteCategoryLocal(catId) {
+      let cats = loadCategoriesLocal();
+      cats = cats.filter(c => c.id !== catId);
+      localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(cats));
+      return true;
+    }
+
+    function loadBudgetLocal() {
+      return parseFloat(localStorage.getItem(STORAGE_KEYS.BUDGET)) || 0;
+    }
+
+    function saveBudgetLocal(amount) {
+      localStorage.setItem(STORAGE_KEYS.BUDGET, amount);
+      return true;
+    }
 
     // Preset Categories
     const PRESET_EXPENSE_CATS = [
@@ -679,6 +955,7 @@
     let currentReportMonth = new Date();
     let budgetAlert80 = false;
     let budgetAlert100 = false;
+    let currentReportView = 'monthly'; // 'daily' or 'monthly'
 
     // Local Storage Keys
     const STORAGE_KEYS = {
@@ -695,7 +972,20 @@
 
     // Auth Functions
     async function checkAuth() {
-      // For demo, use localStorage
+      try {
+        if (USE_APPWRITE()) {
+          // 尝试从 Appwrite 获取当前会话
+          const user = await account.get();
+          currentUser = { id: user.$id, phone: user.email.split('@')[0], name: user.name || 'User' };
+          localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
+          showMainApp();
+          await loadData();
+          return;
+        }
+      } catch (e) {
+        // No active session or Appwrite not configured
+      }
+      // Fallback to localStorage
       const user = localStorage.getItem(STORAGE_KEYS.USER);
       if (user) {
         currentUser = JSON.parse(user);
@@ -731,12 +1021,28 @@
         return;
       }
 
-      // For demo, simulate login
-      currentUser = { id: 'demo-' + Date.now(), phone, name: phone.slice(-4) };
-      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
-      showToast('登录成功');
-      showMainApp();
-      loadData();
+      try {
+        if (USE_APPWRITE()) {
+          // 使用 Appwrite Auth 登录
+          await account.createEmailPasswordSession(phone + '@expense-tracker.local', pwd);
+          const user = await account.get();
+          currentUser = { id: user.$id, phone: user.email.split('@')[0], name: user.name || user.email.split('@')[0] };
+          localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
+          showToast('登录成功');
+          showMainApp();
+          await loadData();
+        } else {
+          // Demo mode: simulate login
+          currentUser = { id: 'demo-' + Date.now(), phone, name: phone.slice(-4) };
+          localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
+          showToast('登录成功（Demo模式）');
+          showMainApp();
+          loadData();
+        }
+      } catch (e) {
+        console.warn('Login failed:', e);
+        showToast('登录失败，请检查Appwrite配置或账号密码');
+      }
     }
 
     async function register() {
@@ -753,17 +1059,43 @@
         return;
       }
 
-      // For demo, create account
-      currentUser = { id: 'demo-' + Date.now(), phone, name: phone.slice(-4) };
-      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
+      try {
+        if (USE_APPWRITE()) {
+          // 使用 Appwrite Auth 注册
+          await account.create('unique()', phone + '@expense-tracker.local', pwd, phone.slice(-4));
+          await account.createEmailPasswordSession(phone + '@expense-tracker.local', pwd);
+          const user = await account.get();
+          currentUser = { id: user.$id, phone, name: phone.slice(-4) };
+          localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
 
-      // Initialize preset categories
-      const cats = [...PRESET_EXPENSE_CATS, ...PRESET_INCOME_CATS];
-      localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(cats));
-
-      showToast('注册成功');
-      showMainApp();
-      loadData();
+          // Initialize preset categories on Appwrite
+          const cats = [...PRESET_EXPENSE_CATS, ...PRESET_INCOME_CATS];
+          for (const cat of cats) {
+            await databases.createDocument(APPWRITE_DATABASE_ID, APPWRITE_CATEGORIES_COLLECTION, 'unique()', {
+              [ATTR.USER_ID]: currentUser.id,
+              [ATTR.NAME]: cat.name,
+              [ATTR.EMOJI]: cat.emoji,
+              [ATTR.IS_CUSTOM]: false,
+              [ATTR.CAT_TYPE]: cat.id.startsWith('e') ? 'expense' : 'income'
+            });
+          }
+          showToast('注册成功');
+          showMainApp();
+          await loadData();
+        } else {
+          // Demo mode
+          currentUser = { id: 'demo-' + Date.now(), phone, name: phone.slice(-4) };
+          localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
+          const cats = [...PRESET_EXPENSE_CATS, ...PRESET_INCOME_CATS];
+          localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(cats));
+          showToast('注册成功（Demo模式）');
+          showMainApp();
+          loadData();
+        }
+      } catch (e) {
+        console.warn('Register failed:', e);
+        showToast('注册失败，请检查Appwrite配置');
+      }
     }
 
     async function logout() {
@@ -781,42 +1113,38 @@
     }
 
     // Data Functions
-    function loadData() {
-      loadCategories();
-      loadBills();
+    async function loadData() {
+      await loadCategories();
+      await loadBills();
       updateHomePage();
       updateBudget();
       renderCategories();
     }
 
-    function loadCategories() {
-      let cats = localStorage.getItem(STORAGE_KEYS.CATEGORIES);
-      if (!cats) {
-        cats = [...PRESET_EXPENSE_CATS, ...PRESET_INCOME_CATS];
-        localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(cats));
+    async function loadCategories() {
+      return await appwriteLoadCategories();
+    }
+
+    async function loadBills() {
+      return await appwriteLoadBills();
+    }
+
+    async function saveBills(bills) {
+      // For bulk save, sync each bill
+      for (const bill of bills) {
+        await appwriteSaveBill(bill);
       }
-      return JSON.parse(cats);
     }
 
-    function loadBills() {
-      let bills = localStorage.getItem(STORAGE_KEYS.BILLS);
-      if (!bills) {
-        bills = [];
-        localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(bills));
+    async function saveCategories(cats) {
+      // For bulk save, sync each category
+      for (const cat of cats) {
+        await appwriteSaveCategory(cat);
       }
-      return JSON.parse(bills);
-    }
-
-    function saveBills(bills) {
-      localStorage.setItem(STORAGE_KEYS.BILLS, JSON.stringify(bills));
-    }
-
-    function saveCategories(cats) {
-      localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(cats));
     }
 
     // Tab Navigation
-    function switchTab(tab) {
+    async function switchTab(tab) {
       document.querySelectorAll('.tab-item').forEach(t => t.classList.remove('active'));
       event.target.closest('.tab-item').classList.add('active');
 
@@ -828,7 +1156,7 @@
 
       if (tab === 'records') {
         renderDateTabs();
-        renderRecords();
+        await renderRecords();
       } else if (tab === 'report') {
         renderReport();
       } else if (tab === 'category') {
@@ -837,8 +1165,8 @@
     }
 
     // Home Page
-    function updateHomePage() {
-      const bills = loadBills();
+    async function updateHomePage() {
+      const bills = await loadBills();
       const now = new Date();
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
       const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -868,7 +1196,7 @@
         return;
       }
 
-      const cats = loadCategories();
+      const cats = loadCategoriesLocal();
       container.innerHTML = records.map(b => {
         const cat = cats.find(c => c.id === b.categoryId) || { emoji: '📌', name: '未知' };
         return `
@@ -885,9 +1213,9 @@
     }
 
     // Budget
-    function updateBudget() {
-      const budget = parseFloat(localStorage.getItem(STORAGE_KEYS.BUDGET)) || 0;
-      const bills = loadBills();
+    async function updateBudget() {
+      const budget = await appwriteLoadBudget();
+      const bills = await loadBills();
       const now = new Date();
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
       const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -938,12 +1266,12 @@
       document.getElementById('budgetAlertModal').classList.add('hidden');
     }
 
-    function saveBudget() {
+    async function saveBudget() {
       const amount = parseFloat(document.getElementById('budgetInput').value) || 0;
-      localStorage.setItem(STORAGE_KEYS.BUDGET, amount);
+      await appwriteSaveBudget(amount);
       budgetAlert80 = false;
       budgetAlert100 = false;
-      updateBudget();
+      await updateBudget();
       showToast('预算已保存');
     }
 
@@ -973,9 +1301,9 @@
       renderRecords(date === 'all' ? null : date);
     }
 
-    function renderRecords(filterDate) {
-      const bills = loadBills();
-      const cats = loadCategories();
+    async function renderRecords(filterDate) {
+      const bills = await loadBills();
+      const cats = loadCategoriesLocal();
       let filtered = bills.sort((a, b) => new Date(b.date) - new Date(a.date));
 
       if (filterDate) {
@@ -1003,10 +1331,10 @@
       }).join('');
     }
 
-    function doSearch() {
+    async function doSearch() {
       const keyword = document.getElementById('searchInput').value.trim().toLowerCase();
-      const bills = loadBills();
-      const cats = loadCategories();
+      const bills = await loadBills();
+      const cats = loadCategoriesLocal();
 
       let filtered = bills.filter(b => {
         const note = (b.note || '').toLowerCase();
@@ -1041,14 +1369,135 @@
     }
 
     // Report Page
-    function renderReport() {
+    async function renderReport() {
+      if (currentReportView === 'daily') {
+        await renderDailyReport();
+      } else {
+        await renderMonthlyReport();
+      }
+    }
+
+    async function renderDailyReport() {
+      const today = new Date().toISOString().split('T')[0];
+      const bills = await loadBills();
+      const cats = loadCategoriesLocal();
+      const todayBills = bills.filter(b => b.date === today);
+
+      const income = todayBills.filter(b => b.type === 'income').reduce((s, b) => s + b.amount, 0);
+      const expense = todayBills.filter(b => b.type === 'expense').reduce((s, b) => s + b.amount, 0);
+      const balance = income - expense;
+
+      // Update header
+      document.querySelector('.month-selector').innerHTML = `
+        <button onclick="setReportView('monthly')" style="background:none;border:1px solid var(--gray-200);border-radius:8px;padding:8px 16px;cursor:pointer;">月报</button>
+        <span class="current-month">日报 - ${new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })}</span>
+        <button onclick="setReportView('daily')" style="background:var(--primary);color:white;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;">日报</button>
+      `;
+
+      document.getElementById('reportIncome').textContent = '¥' + income.toFixed(2);
+      document.getElementById('reportExpense').textContent = '¥' + expense.toFixed(2);
+
+      // Balance display in reportSummary
+      document.getElementById('reportSummary').innerHTML = `
+        <div class="card" style="margin-top:12px;">
+          <div class="card-title">结余</div>
+          <div class="card-value ${balance >= 0 ? 'income' : 'expense'}" style="font-size:32px;">¥${balance.toFixed(2)}</div>
+        </div>
+      `;
+
+      // Category breakdown (expense pie chart as list)
+      const expenseCats = {};
+      todayBills.filter(b => b.type === 'expense').forEach(b => {
+        if (!expenseCats[b.categoryId]) {
+          expenseCats[b.categoryId] = 0;
+        }
+        expenseCats[b.categoryId] += b.amount;
+      });
+
+      const breakdown = document.getElementById('categoryBreakdown');
+      const sortedCats = Object.entries(expenseCats).sort((a, b) => b[1] - a[1]);
+
+      let breakdownHtml = '<div class="card-title">支出分类</div>';
+      if (sortedCats.length === 0) {
+        breakdownHtml += '<div style="color:var(--gray-500);text-align:center;padding:16px;">今日暂无支出</div>';
+      } else {
+        const total = sortedCats.reduce((s, [, v]) => s + v, 0);
+        // Simple pie chart using CSS conic-gradient
+        let pieSegments = '';
+        let currentPct = 0;
+        const colors = ['#EF4444', '#F59E0B', '#10B981', '#3B82F6', '#8B5CF6', '#EC4899', '#6366F1', '#14B8A6'];
+        sortedCats.forEach(([catId, amt], i) => {
+          const pct = (amt / total) * 100;
+          pieSegments += `${colors[i % colors.length]} ${currentPct}% ${currentPct + pct}%`;
+          currentPct += pct;
+          if (i < sortedCats.length - 1) pieSegments += ', ';
+        });
+
+        breakdownHtml += `
+          <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;">
+            <div style="width:80px;height:80px;border-radius:50%;background:conic-gradient(${pieSegments});"></div>
+            <div style="flex:1;">
+              ${sortedCats.slice(0, 4).map(([catId, amt], idx) => {
+                const cat = cats.find(c => c.id === catId) || { emoji: '📌', name: '未知' };
+                const pct = total > 0 ? ((amt / total) * 100).toFixed(1) : 0;
+                return `<div style="display:flex;align-items:center;gap:4px;font-size:12px;margin-bottom:2px;">
+                  <span style="color:${colors[idx % colors.length]};">●</span>
+                  <span>${cat.emoji} ${cat.name}</span>
+                  <span style="margin-left:auto;">${pct}%</span>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>
+          <div style="margin-top:8px;">
+            ${sortedCats.map(([catId, amt], idx) => {
+              const cat = cats.find(c => c.id === catId) || { emoji: '📌', name: '未知' };
+              const pct = total > 0 ? ((amt / total) * 100).toFixed(1) : 0;
+              return `
+                <div style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid var(--gray-100);">
+                  <span style="font-size:18px;margin-right:8px;">${cat.emoji}</span>
+                  <span style="flex:1;font-size:13px;">${cat.name}</span>
+                  <span style="color:var(--danger);font-weight:500;font-size:13px;">-¥${amt.toFixed(2)}</span>
+                  <span style="color:var(--gray-500);font-size:11px;margin-left:8px;">${pct}%</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        `;
+      }
+
+      breakdown.innerHTML = breakdownHtml;
+
+      // Records
+      const records = todayBills.sort((a, b) => new Date(b.date) - new Date(a.date));
+      const reportRecords = document.getElementById('reportRecords');
+
+      if (records.length === 0) {
+        reportRecords.innerHTML = '<div class="empty-state"><div class="icon">📊</div><div>今日暂无账单记录</div></div>';
+      } else {
+        reportRecords.innerHTML = '<div class="card-title" style="margin-bottom:8px;">收支记录</div>' + records.map(b => {
+          const cat = cats.find(c => c.id === b.categoryId) || { emoji: '📌', name: '未知' };
+          return `
+            <div class="list-item" onclick="editBill('${b.id}')">
+              <span class="emoji">${cat.emoji}</span>
+              <div class="info">
+                <div class="category">${cat.name}</div>
+                <div class="note">${b.note || b.date}</div>
+              </div>
+              <div class="amount ${b.type}">${b.type === 'income' ? '+' : '-'}${b.amount.toFixed(2)}</div>
+            </div>
+          `;
+        }).join('');
+      }
+    }
+
+    async function renderMonthlyReport() {
       const year = currentReportMonth.getFullYear();
       const month = currentReportMonth.getMonth();
       const monthStart = new Date(year, month, 1);
       const monthEnd = new Date(year, month + 1, 0);
 
-      const bills = loadBills();
-      const cats = loadCategories();
+      const bills = await loadBills();
+      const cats = loadCategoriesLocal();
       const monthBills = bills.filter(b => {
         const d = new Date(b.date);
         return d >= monthStart && d <= monthEnd;
@@ -1057,7 +1506,16 @@
       const income = monthBills.filter(b => b.type === 'income').reduce((s, b) => s + b.amount, 0);
       const expense = monthBills.filter(b => b.type === 'expense').reduce((s, b) => s + b.amount, 0);
 
-      document.getElementById('reportMonthLabel').textContent = `${year}年${month + 1}月`;
+      // Restore month selector
+      document.querySelector('.month-selector').innerHTML = `
+        <button onclick="changeReportMonth(-1)">◀</button>
+        <span class="current-month" id="reportMonthLabel">${year}年${month + 1}月</span>
+        <button onclick="changeReportMonth(1)">▶</button>
+      `;
+
+      // Clear reportSummary for monthly view
+      document.getElementById('reportSummary').innerHTML = '';
+
       document.getElementById('reportIncome').textContent = '¥' + income.toFixed(2);
       document.getElementById('reportExpense').textContent = '¥' + expense.toFixed(2);
 
@@ -1074,10 +1532,10 @@
       const sortedCats = Object.entries(expenseCats).sort((a, b) => b[1] - a[1]);
 
       if (sortedCats.length === 0) {
-        breakdown.innerHTML = '<div style="color:var(--gray-500);text-align:center;padding:16px;">暂无支出记录</div>';
+        breakdown.innerHTML = '<div class="card-title">支出分类</div><div style="color:var(--gray-500);text-align:center;padding:16px;">暂无支出记录</div>';
       } else {
         const total = sortedCats.reduce((s, [, v]) => s + v, 0);
-        breakdown.innerHTML = sortedCats.map(([catId, amt]) => {
+        breakdown.innerHTML = '<div class="card-title">支出分类</div>' + sortedCats.map(([catId, amt]) => {
           const cat = cats.find(c => c.id === catId) || { emoji: '📌', name: '未知' };
           const pct = total > 0 ? ((amt / total) * 100).toFixed(1) : 0;
           return `
@@ -1098,7 +1556,7 @@
       if (records.length === 0) {
         reportRecords.innerHTML = '<div class="empty-state"><div class="icon">📊</div><div>暂无账单记录</div></div>';
       } else {
-        reportRecords.innerHTML = records.map(b => {
+        reportRecords.innerHTML = '<div class="card-title" style="margin-bottom:8px;">账单明细</div>' + records.map(b => {
           const cat = cats.find(c => c.id === b.categoryId) || { emoji: '📌', name: '未知' };
           return `
             <div class="list-item" onclick="editBill('${b.id}')">
@@ -1114,6 +1572,11 @@
       }
     }
 
+    function setReportView(view) {
+      currentReportView = view;
+      renderReport();
+    }
+
     function changeReportMonth(delta) {
       currentReportMonth.setMonth(currentReportMonth.getMonth() + delta);
       renderReport();
@@ -1121,7 +1584,7 @@
 
     // Category Management
     function renderCategories() {
-      const cats = loadCategories();
+      const cats = loadCategoriesLocal();
       const expenseCats = cats.filter(c => c.id.startsWith('e') || c.id.startsWith('c_e'));
       const incomeCats = cats.filter(c => c.id.startsWith('i') || c.id.startsWith('c_i'));
 
@@ -1165,8 +1628,8 @@
       document.getElementById('billModal').classList.remove('hidden');
     }
 
-    function editBill(id) {
-      const bills = loadBills();
+    async function editBill(id) {
+      const bills = await loadBills();
       const bill = bills.find(b => b.id === id);
       if (!bill) return;
 
@@ -1196,7 +1659,7 @@
     }
 
     function renderBillCategories() {
-      const cats = loadCategories();
+      const cats = loadCategoriesLocal();
       const filtered = cats.filter(c => {
         if (currentBillType === 'expense') {
           return c.id.startsWith('e') || c.id.startsWith('c_e');
@@ -1217,7 +1680,7 @@
       renderBillCategories();
     }
 
-    function saveBill() {
+    async function saveBill() {
       const amount = parseFloat(document.getElementById('billAmount').value);
       const date = document.getElementById('billDate').value;
       const note = document.getElementById('billNote').value.trim();
@@ -1235,45 +1698,31 @@
         return;
       }
 
-      const bills = loadBills();
+      const bill = {
+        id: editingBillId,
+        userId: currentUser.id,
+        amount,
+        type: currentBillType,
+        categoryId: selectedCategory,
+        date,
+        note
+      };
 
-      if (editingBillId) {
-        const idx = bills.findIndex(b => b.id === editingBillId);
-        if (idx !== -1) {
-          bills[idx] = { ...bills[idx], amount, type: currentBillType, categoryId: selectedCategory, date, note, updatedAt: Date.now() };
-        }
-      } else {
-        bills.push({
-          id: 'b_' + Date.now(),
-          userId: currentUser.id,
-          amount,
-          type: currentBillType,
-          categoryId: selectedCategory,
-          date,
-          note,
-          createdAt: Date.now(),
-          updatedAt: Date.now()
-        });
-      }
-
-      saveBills(bills);
+      await appwriteSaveBill(bill);
       closeBillModal();
+      await loadData();
       updateHomePage();
       updateBudget();
       showToast('保存成功');
-
-      // Check budget after saving
-      updateBudget();
     }
 
-    function deleteBill() {
+    async function deleteBill() {
       if (!editingBillId) return;
       if (!confirm('确定删除这条账单？')) return;
 
-      let bills = loadBills();
-      bills = bills.filter(b => b.id !== editingBillId);
-      saveBills(bills);
+      await appwriteDeleteBill(editingBillId);
       closeBillModal();
+      await loadData();
       updateHomePage();
       updateBudget();
       showToast('已删除');
@@ -1292,7 +1741,7 @@
     }
 
     function editCat(id) {
-      const cats = loadCategories();
+      const cats = loadCategoriesLocal();
       const cat = cats.find(c => c.id === id);
       if (!cat) return;
 
@@ -1323,33 +1772,23 @@
       renderCatEmojis();
     }
 
-    function saveCategory() {
+    async function saveCategory() {
       const name = document.getElementById('catName').value.trim();
       if (!name) {
         showToast('请输入分类名称');
         return;
       }
 
-      const cats = loadCategories();
+      const cat = {
+        id: editingCatId,
+        name,
+        emoji: selectedEmoji,
+        type: currentCatType
+      };
 
-      if (editingCatId) {
-        const idx = cats.findIndex(c => c.id === editingCatId);
-        if (idx !== -1) {
-          cats[idx] = { ...cats[idx], name, emoji: selectedEmoji };
-        }
-      } else {
-        cats.push({
-          id: 'c_' + (currentCatType === 'expense' ? 'e' : 'i') + '_' + Date.now(),
-          name,
-          emoji: selectedEmoji,
-          type: currentCatType,
-          isCustom: true
-        });
-      }
-
-      saveCategories(cats);
+      await appwriteSaveCategory(cat);
       closeCatModal();
-      renderCategories();
+      await loadData();
       showToast('保存成功');
     }
 
@@ -1358,11 +1797,9 @@
       deleteCategoryById(id);
     }
 
-    function deleteCategoryById(id) {
-      let cats = loadCategories();
-      cats = cats.filter(c => c.id !== id);
-      saveCategories(cats);
-      renderCategories();
+    async function deleteCategoryById(id) {
+      await appwriteDeleteCategory(id);
+      await loadData();
       showToast('已删除');
     }
 

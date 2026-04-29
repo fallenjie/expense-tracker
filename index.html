@@ -953,6 +953,7 @@
     let currentCatType = 'expense';
     let selectedEmoji = '💰';
     let currentReportMonth = new Date();
+    let currentReportDate = new Date(); // For daily report date navigation
     let budgetAlert80 = false;
     let budgetAlert100 = false;
     let currentReportView = 'monthly'; // 'daily' or 'monthly'
@@ -1378,19 +1379,21 @@
     }
 
     async function renderDailyReport() {
-      const today = new Date().toISOString().split('T')[0];
+      const reportDate = currentReportDate.toISOString().split('T')[0];
       const bills = await loadBills();
       const cats = loadCategoriesLocal();
-      const todayBills = bills.filter(b => b.date === today);
+      const todayBills = bills.filter(b => b.date === reportDate);
 
       const income = todayBills.filter(b => b.type === 'income').reduce((s, b) => s + b.amount, 0);
       const expense = todayBills.filter(b => b.type === 'expense').reduce((s, b) => s + b.amount, 0);
       const balance = income - expense;
 
-      // Update header
+      // Update header with date navigation
       document.querySelector('.month-selector').innerHTML = `
         <button onclick="setReportView('monthly')" style="background:none;border:1px solid var(--gray-200);border-radius:8px;padding:8px 16px;cursor:pointer;">月报</button>
-        <span class="current-month">日报 - ${new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })}</span>
+        <button onclick="changeReportDate(-1)">◀</button>
+        <span class="current-month">${currentReportDate.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })}</span>
+        <button onclick="changeReportDate(1)">▶</button>
         <button onclick="setReportView('daily')" style="background:var(--primary);color:white;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;">日报</button>
       `;
 
@@ -1506,11 +1509,12 @@
       const income = monthBills.filter(b => b.type === 'income').reduce((s, b) => s + b.amount, 0);
       const expense = monthBills.filter(b => b.type === 'expense').reduce((s, b) => s + b.amount, 0);
 
-      // Restore month selector
+      // Restore month selector with daily view toggle
       document.querySelector('.month-selector').innerHTML = `
         <button onclick="changeReportMonth(-1)">◀</button>
         <span class="current-month" id="reportMonthLabel">${year}年${month + 1}月</span>
         <button onclick="changeReportMonth(1)">▶</button>
+        <button onclick="goToDailyReport()" style="background:none;border:1px solid var(--gray-200);border-radius:8px;padding:8px 16px;cursor:pointer;">日报</button>
       `;
 
       // Clear reportSummary for monthly view
@@ -1580,6 +1584,16 @@
     function changeReportMonth(delta) {
       currentReportMonth.setMonth(currentReportMonth.getMonth() + delta);
       renderReport();
+    }
+
+    function changeReportDate(delta) {
+      currentReportDate.setDate(currentReportDate.getDate() + delta);
+      renderReport();
+    }
+
+    function goToDailyReport() {
+      currentReportDate = new Date();
+      setReportView('daily');
     }
 
     // Category Management
